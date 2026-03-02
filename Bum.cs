@@ -2,12 +2,13 @@
 using Robocode.TankRoyale.BotApi;
 using Robocode.TankRoyale.BotApi.Events;
 using System;
-using System.Xml.Linq;
 public class Bum : Bot
 {// Direction variable: 1 = Clockwise, -1 = Counter-Clockwise
-    private int _orbitDirection = 1;
     private bool _wasRammed;
     private const double WallOffset = 36;
+    private bool _cornerChosen;
+    private double _cornerX;
+    private double _cornerY;
 
     // The main method starts our bot
     static void Main(string[] args)
@@ -26,7 +27,7 @@ public class Bum : Bot
         AdjustRadarForGunTurn = true;
 
         // Start the radar spinning to find an enemy
-        TurnRadarLeft(double.PositiveInfinity);
+        SetTurnRadarLeft(double.PositiveInfinity);
 
         // Repeat while the bot is running
         while (IsRunning)
@@ -64,7 +65,8 @@ public class Bum : Bot
     {
         // Calculate the turn required to face the enemy coordinates
 
-        double bulletSpeed = CalcBulletSpeed(0.5);
+        double firePower = _wasRammed ? 3.0 : 1.0;
+        double bulletSpeed = CalcBulletSpeed(firePower);
 
         // relative position (unit circle)
         double dx = e.X - X;
@@ -114,7 +116,6 @@ public class Bum : Bot
 
         if (GunHeat == 0 && Math.Abs(GunBearingTo(e.X, e.Y)) <= 3)
         {
-            double firePower = _wasRammed ? 3.0 : 1.0;
             SetFire(firePower);
             _wasRammed = false;
         }
@@ -127,86 +128,69 @@ public class Bum : Bot
     // Abstracted Movement Logic
     private void CalculateOrbitalMovement(ScannedBotEvent e)
     {
-        // Move along an inset rectangle (1 tile from each wall) clockwise/counter-clockwise.
+        // Move to the nearest inset corner, then stay parked there.
         double minX = WallOffset;
         double minY = WallOffset;
         double maxX = ArenaWidth - WallOffset;
         double maxY = ArenaHeight - WallOffset;
 
-        double targetX;
-        double targetY;
-        double tolerance = 24;
-
-        if (_orbitDirection > 0)
+        if (!_cornerChosen)
         {
-            if (Y <= minY + tolerance)
+            double[,] corners =
             {
-                targetX = maxX;
-                targetY = minY;
-            }
-            else if (X >= maxX - tolerance)
+                { minX, minY },
+                { minX, maxY },
+                { maxX, minY },
+                { maxX, maxY }
+            };
+
+            double bestDistance = double.MaxValue;
+            for (int i = 0; i < 4; i++)
             {
-                targetX = maxX;
-                targetY = maxY;
+                double cx = corners[i, 0];
+                double cy = corners[i, 1];
+                double distance = DistanceTo(cx, cy);
+                if (distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    _cornerX = cx;
+                    _cornerY = cy;
+                }
             }
-            else if (Y >= maxY - tolerance)
-            {
-                targetX = minX;
-                targetY = maxY;
-            }
-            else
-            {
-                targetX = minX;
-                targetY = minY;
-            }
+
+            _cornerChosen = true;
+        }
+
+        double cornerDistance = DistanceTo(_cornerX, _cornerY);
+        if (cornerDistance > 20)
+        {
+            double goalDirection = DirectionTo(_cornerX, _cornerY);
+            double turnAngle = CalcDeltaAngle(goalDirection, Direction);
+
+            SetTurnLeft(turnAngle);
+            SetForward(Math.Min(100, cornerDistance));
         }
         else
         {
-            if (Y <= minY + tolerance)
-            {
-                targetX = minX;
-                targetY = minY;
-            }
-            else if (X <= minX + tolerance)
-            {
-                targetX = minX;
-                targetY = maxY;
-            }
-            else if (Y >= maxY - tolerance)
-            {
-                targetX = maxX;
-                targetY = maxY;
-            }
-            else
-            {
-                targetX = maxX;
-                targetY = minY;
-            }
+            // Hold this inset corner and keep scanning/firing.
+            SetForward(0);
         }
-
-        double goalDirection = DirectionTo(targetX, targetY);
-        double turnAngle = CalcDeltaAngle(goalDirection, Direction);
-
-        SetTurnLeft(turnAngle);
-        SetForward(100);
     }
 
     // If we hit a wall, reverse direction immediately so we don't get stuck
     public override void OnHitWall(HitWallEvent botHitWallEvent)
     {
-        _orbitDirection = -_orbitDirection;
+        _cornerChosen = false;
     }
 
     // If we get hit by a bullet, switch orbital direction to try and confuse the enemy's targeting
     public override void OnHitByBullet(HitByBulletEvent evt)
     {
-        _orbitDirection = -_orbitDirection;
     }
 
     // If we crash into the enemy, switch direction to roll around them
     public override void OnHitBot(HitBotEvent botHitBotEvent)
     {
         _wasRammed = true;
-        _orbitDirection = -_orbitDirection;
     }
 }
