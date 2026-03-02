@@ -6,6 +6,8 @@ using System.Xml.Linq;
 public class Bum : Bot
 {// Direction variable: 1 = Clockwise, -1 = Counter-Clockwise
     private int _orbitDirection = 1;
+    private bool _wasRammed;
+    private const double WallOffset = 36;
 
     // The main method starts our bot
     static void Main(string[] args)
@@ -41,8 +43,8 @@ public class Bum : Bot
         // Get the angle to the enemy relative to the radar
         double bearing = RadarBearingTo(e.X, e.Y);
 
-        // Calculate the extra scan width (Overshoot) to ensure we cover the enemy's width
-        double spread = Math.Atan(36.0 / DistanceTo(e.X, e.Y)) * (180.0 / Math.PI);
+        // Calculate a dynamic lock width with a tiny floor to keep the lock stable
+        double spread = Math.Max(1.5, Math.Atan(36.0 / DistanceTo(e.X, e.Y)) * (180.0 / Math.PI));
 
         // Determine the turn amount. If bearing is positive (left), scan more left.
         double radarTurn = bearing + (bearing >= 0 ? spread : -spread);
@@ -110,8 +112,12 @@ public class Bum : Bot
         else
             SetTurnGunRight(-delta); // CW
 
-        if (GunHeat == 0)
-            SetFire(0.5);
+        if (GunHeat == 0 && Math.Abs(GunBearingTo(e.X, e.Y)) <= 3)
+        {
+            double firePower = _wasRammed ? 3.0 : 1.0;
+            SetFire(firePower);
+            _wasRammed = false;
+        }
 
         // Set the gun to turn
 
@@ -121,71 +127,68 @@ public class Bum : Bot
     // Abstracted Movement Logic
     private void CalculateOrbitalMovement(ScannedBotEvent e)
     {
-        // 1. Get the absolute angle to the enemy (0-360 degrees)
-        double angleToEnemy = DirectionTo(e.X, e.Y);
+        // Move along an inset rectangle (1 tile from each wall) clockwise/counter-clockwise.
+        double minX = WallOffset;
+        double minY = WallOffset;
+        double maxX = ArenaWidth - WallOffset;
+        double maxY = ArenaHeight - WallOffset;
 
-        // 2. Calculate the desired Orbital Angle.
-        // If we add 90 degrees to the angleToEnemy, we will move perpendicular 
-        // to them (a perfect circle).
-        // _orbitDirection (1 or -1) determines if we orbit Clockwise or Counter-Clockwise.
-        double goalDirection = angleToEnemy + (_orbitDirection * 90);
+        double targetX;
+        double targetY;
+        double tolerance = 24;
 
-        // 3. Apply Wall Smoothing.
-        // If moving at 'goalDirection' would make us hit a wall, this method
-        // calculates a new, safe angle to glide along the wall instead.
-        double smoothedDirection = WallSmooth(goalDirection);
-
-        // 4. Calculate how much we need to turn the BODY to face this new direction.
-        // CalcDeltaAngle handles the math to find the shortest turn (left or right).
-        double turnAngle = CalcDeltaAngle(smoothedDirection, Direction);
-
-        // 5. Execute commands
-        SetTurnLeft(turnAngle);
-        SetForward(100); // Always try to move full speed
-    }
-
-    // Wall Smoothing Algorithm (Whisker/Stick projection)
-    private double WallSmooth(double goalAngle)
-    {
-        // Define the "Stick" length. This is how far ahead we look for walls.
-        // 160 units is roughly 20 ticks of movement at max speed (8.0).
-        double stickLength = 160;
-
-        // Define a safety margin so we don't scrape the paint off the walls
-        double margin = 20;
-
-        // Loop to find a safe angle
-        // We will test the 'goalAngle'. If it hits a wall, we rotate it slightly
-        // and test again, repeating until we find an angle that fits in the arena.
-        // We limit the loop to 25 iterations to prevent infinite freezing.
-        for (int i = 0; i < 25; i++)
+        if (_orbitDirection > 0)
         {
-            // 1. Convert the angle to Radians (Math.Cos/Sin require Radians)
-            double angleRadians = goalAngle * (Math.PI / 180.0);
-
-            // 2. Project the tip of the "stick" based on our current X,Y
-            // Note: In Robocode/TankRoyale, 0 deg is East (Cos=1), 90 deg is North (Sin=1)
-            double projectedX = X + (Math.Cos(angleRadians) * stickLength);
-            double projectedY = Y + (Math.Sin(angleRadians) * stickLength);
-
-            // 3. Check if that projected point is inside the arena boundaries
-            bool safeX = projectedX > margin && projectedX < ArenaWidth - margin;
-            bool safeY = projectedY > margin && projectedY < ArenaHeight - margin;
-
-            if (safeX && safeY)
+            if (Y <= minY + tolerance)
             {
-                // The angle is safe! Return it.
-                return goalAngle;
+                targetX = maxX;
+                targetY = minY;
             }
-
-            // 4. If not safe, rotate the angle slightly.
-            // We rotate *against* the orbit direction to curve inward/away from the wall.
-            // 5 degrees per iteration provides a smooth curve.
-            goalAngle -= _orbitDirection * 5;
+            else if (X >= maxX - tolerance)
+            {
+                targetX = maxX;
+                targetY = maxY;
+            }
+            else if (Y >= maxY - tolerance)
+            {
+                targetX = minX;
+                targetY = maxY;
+            }
+            else
+            {
+                targetX = minX;
+                targetY = minY;
+            }
+        }
+        else
+        {
+            if (Y <= minY + tolerance)
+            {
+                targetX = minX;
+                targetY = minY;
+            }
+            else if (X <= minX + tolerance)
+            {
+                targetX = minX;
+                targetY = maxY;
+            }
+            else if (Y >= maxY - tolerance)
+            {
+                targetX = maxX;
+                targetY = maxY;
+            }
+            else
+            {
+                targetX = maxX;
+                targetY = minY;
+            }
         }
 
-        // If we fail to find a smooth angle, return the original (fallback)
-        return goalAngle;
+        double goalDirection = DirectionTo(targetX, targetY);
+        double turnAngle = CalcDeltaAngle(goalDirection, Direction);
+
+        SetTurnLeft(turnAngle);
+        SetForward(100);
     }
 
     // If we hit a wall, reverse direction immediately so we don't get stuck
@@ -203,6 +206,7 @@ public class Bum : Bot
     // If we crash into the enemy, switch direction to roll around them
     public override void OnHitBot(HitBotEvent botHitBotEvent)
     {
+        _wasRammed = true;
         _orbitDirection = -_orbitDirection;
     }
 }
