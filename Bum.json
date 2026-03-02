@@ -1,0 +1,16 @@
+{
+  "name": "Bum",
+  "version": "1.0",
+  "authors": [
+    "(Designer Name)",
+    "(2nd Designer Name)"
+  ],
+  "description": "(Bot Description)",
+  "homepage": "",
+  "countryCodes": [
+    "us",
+    "dk"
+  ],
+  "platform": ".NET 6.0",
+  "programmingLang": "C# 10.0"
+}
