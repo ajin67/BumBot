@@ -1,196 +1,258 @@
-
 using Robocode.TankRoyale.BotApi;
 using Robocode.TankRoyale.BotApi.Events;
 using System;
-public class Bum : Bot
-{// Direction variable: 1 = Clockwise, -1 = Counter-Clockwise
-    private bool _wasRammed;
-    private const double WallOffset = 36;
-    private bool _cornerChosen;
-    private double _cornerX;
-    private double _cornerY;
+using System.Collections.Generic;
 
-    // The main method starts our bot
+public class Bum : Bot
+{
+    private const double WallOffset = 36;
+
+    private bool _wasRammed;
+    private double _lastEnemyEnergy = 100;
+    private double _lastEnemyDirection;
+    private bool _hasEnemyDirection;
+    private int _surfDirection = 1;
+
+    private readonly List<EnemyWave> _enemyWaves = new();
+
+    private class EnemyWave
+    {
+        public double SourceX;
+        public double SourceY;
+        public double BulletSpeed;
+        public int FireTurn;
+    }
+
     static void Main(string[] args)
     {
         new Bum().Start();
     }
 
-    // Called when a new round is started
     public override void Run()
     {
-        // IMPORTANT: For orbital movement, we must decouple the parts.
-        // If these are false, turning the body to avoid a wall will 
-        // jerk the radar/gun to the side, breaking your lock.
+        _enemyWaves.Clear();
+        _lastEnemyEnergy = 100;
+        _hasEnemyDirection = false;
+        _wasRammed = false;
+
         AdjustRadarForBodyTurn = true;
         AdjustGunForBodyTurn = true;
         AdjustRadarForGunTurn = true;
 
-        // Start the radar spinning to find an enemy
         SetTurnRadarLeft(double.PositiveInfinity);
 
-        // Repeat while the bot is running
         while (IsRunning)
         {
             Go();
         }
     }
 
-    // We saw another bot -> Lock, Fire, and Move!
     public override void OnScannedBot(ScannedBotEvent e)
     {
-        // --- 1. Radar Lock Logic ---
+        TrackEnemyWaves(e);
 
-        // Get the angle to the enemy relative to the radar
         double bearing = RadarBearingTo(e.X, e.Y);
-
-        // Calculate a dynamic lock width with a tiny floor to keep the lock stable
         double spread = Math.Max(1.5, Math.Atan(36.0 / DistanceTo(e.X, e.Y)) * (180.0 / Math.PI));
-
-        // Determine the turn amount. If bearing is positive (left), scan more left.
         double radarTurn = bearing + (bearing >= 0 ? spread : -spread);
-
-        // Execute the radar turn immediately
         SetTurnRadarLeft(radarTurn);
 
-        // --- 2. Firing Logic ---
         CalculateFiringSolution(e);
-
-        // --- 3. Movement Logic (Orbital + Wall Smooth) ---
         CalculateOrbitalMovement(e);
     }
 
-    // Abstracted Firing Logic
+    private void TrackEnemyWaves(ScannedBotEvent e)
+    {
+        double energyDrop = _lastEnemyEnergy - e.Energy;
+        if (energyDrop >= 0.1 && energyDrop <= 3.0)
+        {
+            _enemyWaves.Add(new EnemyWave
+            {
+                SourceX = e.X,
+                SourceY = e.Y,
+                BulletSpeed = CalcBulletSpeed(energyDrop),
+                FireTurn = TurnNumber
+            });
+        }
+
+        _lastEnemyEnergy = e.Energy;
+
+        _enemyWaves.RemoveAll(w =>
+        {
+            double traveled = (TurnNumber - w.FireTurn) * w.BulletSpeed;
+            double distanceToMe = Math.Sqrt((X - w.SourceX) * (X - w.SourceX) + (Y - w.SourceY) * (Y - w.SourceY));
+            return traveled > distanceToMe + 60;
+        });
+    }
+
     private void CalculateFiringSolution(ScannedBotEvent e)
     {
-        // Calculate the turn required to face the enemy coordinates
-
         double firePower = _wasRammed ? 3.0 : 1.0;
         double bulletSpeed = CalcBulletSpeed(firePower);
 
-        // relative position (unit circle)
-        double dx = e.X - X;
-        double dy = e.Y - Y;
+        double enemyHeading = e.Direction;
+        double enemyTurnRate = 0;
+        if (_hasEnemyDirection)
+        {
+            enemyTurnRate = NormalizeRelative(enemyHeading - _lastEnemyDirection);
+            enemyTurnRate = Math.Clamp(enemyTurnRate, -10, 10);
+        }
 
-        // target velocity (unit circle)
-        double vtx = e.Speed * Math.Cos(e.Direction * Math.PI / 180.0);
-        double vty = e.Speed * Math.Sin(e.Direction * Math.PI / 180.0);
+        _lastEnemyDirection = enemyHeading;
+        _hasEnemyDirection = true;
 
-        // quadratic coefficients
-        double A = (vtx * vtx + vty * vty) - (bulletSpeed * bulletSpeed);
-        double B = 2 * (dx * vtx + dy * vty);
-        double C = dx * dx + dy * dy;
+        double predictedX = e.X;
+        double predictedY = e.Y;
+        double predictedHeading = enemyHeading;
+        double predictedSpeed = e.Speed;
 
-        // discriminant
-        double discriminant = B * B - 4 * A * C;
-        if (discriminant < 0) return;
+        for (int t = 1; t < 120; t++)
+        {
+            predictedHeading += enemyTurnRate;
+            predictedX += Math.Cos(predictedHeading * Math.PI / 180.0) * predictedSpeed;
+            predictedY += Math.Sin(predictedHeading * Math.PI / 180.0) * predictedSpeed;
 
-        double sqrtD = Math.Sqrt(discriminant);
-        double t1 = (-B + sqrtD) / (2 * A);
-        double t2 = (-B - sqrtD) / (2 * A);
+            predictedX = Math.Clamp(predictedX, WallOffset, ArenaWidth - WallOffset);
+            predictedY = Math.Clamp(predictedY, WallOffset, ArenaHeight - WallOffset);
 
-        // pick smallest positive t
-        double t = double.MaxValue;
-        if (t1 > 0 && t1 < t) t = t1;
-        if (t2 > 0 && t2 < t) t = t2;
-        if (t == double.MaxValue) return;
+            if (DistanceTo(predictedX, predictedY) <= bulletSpeed * t)
+                break;
+        }
 
-        // intercept direction (unit circle)
-        double ux = (dx + vtx * t) / (bulletSpeed * t);
-        double uy = (dy + vty * t) / (bulletSpeed * t);
+        double aimAngle = DirectionTo(predictedX, predictedY);
+        double delta = NormalizeRelative(aimAngle - GunDirection);
 
-        // aim angle (unit circle)
-        double aimAngle = Math.Atan2(uy, ux) * 180.0 / Math.PI;
-
-        // compute shortest turn in unit-circle space
-        double delta = aimAngle - GunDirection;
-        delta = (delta + 180) % 360;
-        if (delta < 0) delta += 360;
-        delta -= 180;
-
-        // apply turn (unit circle: positive = CCW)
         if (delta > 0)
-            SetTurnGunLeft(delta);   // CCW
+            SetTurnGunLeft(delta);
         else
-            SetTurnGunRight(-delta); // CW
+            SetTurnGunRight(-delta);
 
-        if (GunHeat == 0 && Math.Abs(GunBearingTo(e.X, e.Y)) <= 3)
+        if (GunHeat == 0 && Math.Abs(GunBearingTo(predictedX, predictedY)) <= 3)
         {
             SetFire(firePower);
             _wasRammed = false;
         }
-
-        // Set the gun to turn
-
-
     }
 
-    // Abstracted Movement Logic
     private void CalculateOrbitalMovement(ScannedBotEvent e)
     {
-        // Move to the nearest inset corner, then stay parked there.
-        double minX = WallOffset;
-        double minY = WallOffset;
-        double maxX = ArenaWidth - WallOffset;
-        double maxY = ArenaHeight - WallOffset;
+        EnemyWave surfWave = GetClosestWave();
+        double enemyBearing = DirectionTo(e.X, e.Y);
 
-        if (!_cornerChosen)
+        int direction = _surfDirection;
+        if (surfWave != null)
         {
-            double[,] corners =
-            {
-                { minX, minY },
-                { minX, maxY },
-                { maxX, minY },
-                { maxX, maxY }
-            };
-
-            double bestDistance = double.MaxValue;
-            for (int i = 0; i < 4; i++)
-            {
-                double cx = corners[i, 0];
-                double cy = corners[i, 1];
-                double distance = DistanceTo(cx, cy);
-                if (distance < bestDistance)
-                {
-                    bestDistance = distance;
-                    _cornerX = cx;
-                    _cornerY = cy;
-                }
-            }
-
-            _cornerChosen = true;
+            double leftDanger = PredictWaveDanger(surfWave, enemyBearing, -1);
+            double rightDanger = PredictWaveDanger(surfWave, enemyBearing, 1);
+            direction = leftDanger < rightDanger ? -1 : 1;
         }
 
-        double cornerDistance = DistanceTo(_cornerX, _cornerY);
-        if (cornerDistance > 20)
-        {
-            double goalDirection = DirectionTo(_cornerX, _cornerY);
-            double turnAngle = CalcDeltaAngle(goalDirection, Direction);
+        _surfDirection = direction;
 
-            SetTurnLeft(turnAngle);
-            SetForward(Math.Min(100, cornerDistance));
-        }
-        else
-        {
-            // Hold this inset corner and keep scanning/firing.
-            SetForward(0);
-        }
+        double goalDirection = WallSmoothing(enemyBearing + (90 * direction), direction);
+        double turnAngle = CalcDeltaAngle(goalDirection, Direction);
+
+        SetTurnLeft(turnAngle);
+        SetForward(100);
     }
 
-    // If we hit a wall, reverse direction immediately so we don't get stuck
+    private EnemyWave GetClosestWave()
+    {
+        EnemyWave closest = null;
+        double closestDistance = double.MaxValue;
+
+        foreach (var wave in _enemyWaves)
+        {
+            double traveled = (TurnNumber - wave.FireTurn) * wave.BulletSpeed;
+            double distance = Math.Sqrt((X - wave.SourceX) * (X - wave.SourceX) + (Y - wave.SourceY) * (Y - wave.SourceY));
+            double distanceToImpact = distance - traveled;
+
+            if (distanceToImpact > 0 && distanceToImpact < closestDistance)
+            {
+                closestDistance = distanceToImpact;
+                closest = wave;
+            }
+        }
+
+        return closest;
+    }
+
+    private double PredictWaveDanger(EnemyWave wave, double enemyBearing, int direction)
+    {
+        double px = X;
+        double py = Y;
+        double heading = Direction;
+        double velocity = Speed;
+
+        for (int i = 0; i < 40; i++)
+        {
+            double moveAngle = WallSmoothing(enemyBearing + (90 * direction), direction, px, py);
+            double turn = NormalizeRelative(moveAngle - heading);
+            double maxTurn = 10 - 0.75 * Math.Abs(velocity);
+            turn = Math.Clamp(turn, -maxTurn, maxTurn);
+            heading += turn;
+
+            velocity = Math.Clamp(velocity + 1, -8, 8);
+            px += Math.Cos(heading * Math.PI / 180.0) * velocity;
+            py += Math.Sin(heading * Math.PI / 180.0) * velocity;
+
+            px = Math.Clamp(px, WallOffset, ArenaWidth - WallOffset);
+            py = Math.Clamp(py, WallOffset, ArenaHeight - WallOffset);
+
+            double traveled = (TurnNumber - wave.FireTurn + i + 1) * wave.BulletSpeed;
+            double distFromSource = Math.Sqrt((px - wave.SourceX) * (px - wave.SourceX) + (py - wave.SourceY) * (py - wave.SourceY));
+            if (traveled >= distFromSource - 18)
+            {
+                double wallDanger = 1.0 / (Math.Min(Math.Min(px - WallOffset, ArenaWidth - WallOffset - px), Math.Min(py - WallOffset, ArenaHeight - WallOffset - py)) + 1);
+                double enemyDanger = 1.0 / (DistanceTo(px, py, wave.SourceX, wave.SourceY) + 1);
+                return wallDanger * 3 + enemyDanger;
+            }
+        }
+
+        return 1;
+    }
+
+    private double WallSmoothing(double angle, int direction)
+    {
+        return WallSmoothing(angle, direction, X, Y);
+    }
+
+    private double WallSmoothing(double angle, int direction, double fromX, double fromY)
+    {
+        double smoothed = angle;
+        for (int i = 0; i < 40; i++)
+        {
+            double testX = fromX + Math.Cos(smoothed * Math.PI / 180.0) * 120;
+            double testY = fromY + Math.Sin(smoothed * Math.PI / 180.0) * 120;
+
+            if (testX > WallOffset && testX < ArenaWidth - WallOffset && testY > WallOffset && testY < ArenaHeight - WallOffset)
+                break;
+
+            smoothed += direction * 4;
+        }
+
+        return smoothed;
+    }
+
+    private static double NormalizeRelative(double angle)
+    {
+        angle = (angle + 180) % 360;
+        if (angle < 0) angle += 360;
+        return angle - 180;
+    }
+
+    private static double DistanceTo(double x1, double y1, double x2, double y2)
+    {
+        return Math.Sqrt((x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2));
+    }
+
     public override void OnHitWall(HitWallEvent botHitWallEvent)
     {
-        _cornerChosen = false;
+        _surfDirection = -_surfDirection;
     }
 
-    // If we get hit by a bullet, switch orbital direction to try and confuse the enemy's targeting
-    public override void OnHitByBullet(HitByBulletEvent evt)
-    {
-    }
-
-    // If we crash into the enemy, switch direction to roll around them
     public override void OnHitBot(HitBotEvent botHitBotEvent)
     {
         _wasRammed = true;
+        _surfDirection = -_surfDirection;
     }
 }
